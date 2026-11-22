@@ -118,7 +118,7 @@ class ATMSystem:
         if len(parts) != 2:
             return None
         acc_no, pin = parts
-        if len(acc_no) == 5 and acc_no.isdigit() and len(pin) == 4 and pin.isdigit():
+        if len(acc_no) == 4 and acc_no.isdigit() and len(pin) == 4 and pin.isdigit():
             return acc_no, pin
         return None
 
@@ -148,11 +148,14 @@ class ATMSystem:
         return ""
 
     def blank_drive(self):
-        found = self.drives()
-        for d in found:
-            if not self.read_card(d):
-                return d
-        return found[0] if found else ""
+        for drive in self.drives():
+            card_path = os.path.join(drive, CARD_FILE)
+
+        # Only allow USB drives without an existing card file
+        if not os.path.exists(card_path):
+            return drive
+
+        return ""
 
     def card_state(self):
         d = self.card_drive()
@@ -175,10 +178,14 @@ class ATMSystem:
         if not self.is_valid_contact(contact):
             return False, "Invalid contact number! Must be exactly 11 digits (numbers only).", None
         if not math.isfinite(deposit) or deposit < 5000 or deposit > MAX_AMOUNT:
-            return False, "Initial deposit must be between \u20b15,000 and \u20b11,000,000,000.", None
-        if not self.is_valid_pin(pin):
-            return False, "PIN must be exactly 4 digits (numbers only).", None
+            return False, "Initial deposit must be \u20b15,000.", None
+        if not self.drives():
+            return False, "No flash drive detected. Please insert a USB card.", None
 
+        drive = self.blank_drive()
+
+        if not drive:
+            return False, "This USB card is already assigned to an account. Please insert an unregistered USB card.", None
         drive = self.blank_drive()
         if not drive:
             return False, "No flash drive detected. Registration cannot be completed without a card.", None
