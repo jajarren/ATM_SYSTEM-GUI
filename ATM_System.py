@@ -1,13 +1,6 @@
-"""
-ATM SYSTEM - single file (backend + GUI)
-
-Run:   python atm_system.py
-Needs: nothing extra (tkinter ships with Python).
-
-The interface follows the "ATM SYSTEM" Figma design (960 x 720).
-"""
+#Coded by Jarren E. Auditor
+#ADMIN PASSWORD: 12345
 import base64
-import io
 import itertools
 import math
 import os
@@ -18,29 +11,19 @@ import time
 import tkinter as tk
 import tkinter.font as tkfont
 import zlib
-from contextlib import redirect_stdout
+from datetime import datetime
 
 IS_WINDOWS = sys.platform.startswith("win")
 if IS_WINDOWS:
     import ctypes
 
-# =====================================================================
-#  SETTINGS
-# =====================================================================
-# TEST MODE: treat a normal folder as the "USB card" so you can test
-# without a flash drive. Set TEST_MODE = False to use a real removable drive.
-TEST_MODE = True
 HERE = os.path.dirname(os.path.abspath(__file__))
-TEST_DRIVE_PATH = os.path.join(HERE, "fake_usb") + os.sep   # created automatically
-
 MASTER_FILE = os.path.join(HERE, "master_list.txt")
 CARD_FILE = "atm_card.txt"
 ADMIN_PASSWORD = "12345"
+MAX_AMOUNT = 1_000_000_000
 
 
-# =====================================================================
-#  BACKEND
-# =====================================================================
 class Account:
     def __init__(self, account_no="", account_name="", birthday="",
                  contact_number="", balance=0.0, encrypted_pin=""):
@@ -62,11 +45,9 @@ class ATMSystem:
     def __init__(self, master_file=MASTER_FILE):
         self.head = None
         self.master_file = master_file
-        self.last_error = ""
         random.seed(time.time())
         self.retrieve()
 
-    # ---------- helpers ----------
     def locate(self, acc_no):
         p = self.head
         while p is not None:
@@ -75,43 +56,30 @@ class ATMSystem:
             p = p.next
         return None
 
-    def find_usb_drive_path(self):
-        """Path of the inserted card / flash drive, or '' if none."""
-        if TEST_MODE:
-            try:
-                os.makedirs(TEST_DRIVE_PATH, exist_ok=True)
-            except OSError:
-                return ""
-            return TEST_DRIVE_PATH
-        if IS_WINDOWS:
-            drive_mask = ctypes.windll.kernel32.GetLogicalDrives()
-            DRIVE_REMOVABLE = 2
-            for i in range(26):
-                if drive_mask & (1 << i):
-                    path = chr(ord("A") + i) + ":\\"
-                    if ctypes.windll.kernel32.GetDriveTypeW(path) == DRIVE_REMOVABLE:
-                        return path
-        return ""
-
-    def card_present(self):
-        return bool(self.find_usb_drive_path())
+    def all_accounts(self):
+        out, p = [], self.head
+        while p is not None:
+            out.append(p.data)
+            p = p.next
+        return out
 
     def generate_account_no(self):
         while True:
-            acc_no = str(random.randint(10000, 99999))
+            acc_no = str(random.randint(1000, 9999))
             if self.locate(acc_no) is None:
                 return acc_no
 
     @staticmethod
     def encrypt_pin(pin):
-        # add 3 to each digit (mod 10), e.g. 1234 -> 4567
         return "".join(str((int(c) + 3) % 10) for c in pin)
 
     @staticmethod
     def is_valid_birthday(bday):
-        if len(bday) != 10 or bday[2] != "/" or bday[5] != "/":
+        try:
+            datetime.strptime(bday, "%m/%d/%Y")
+        except ValueError:
             return False
-        return all(ch.isdigit() for i, ch in enumerate(bday) if i not in (2, 5))
+        return len(bday) == 10
 
     @staticmethod
     def is_valid_contact(contact):
@@ -121,262 +89,276 @@ class ATMSystem:
     def is_valid_pin(pin):
         return len(pin) == 4 and pin.isdigit()
 
-    # ---------- card I/O ----------
-    def write_to_card(self, path, acc_no, encrypted_pin):
-        try:
-            with open(os.path.join(path, CARD_FILE), "w") as f:
-                f.write(f"{acc_no} {encrypted_pin}\n")
-            return True
-        except OSError as err:
-            self.last_error = str(err)
-            return False
+    @staticmethod
+    def is_valid_amount(amount):
+        return math.isfinite(amount) and 0 < amount <= MAX_AMOUNT
 
-    def read_card(self, path):
-        """Return (acc_no, pin) or None."""
+    def drives(self):
+        """Paths of every inserted flash drive."""
+        found = []
+        if IS_WINDOWS:
+            mask = ctypes.windll.kernel32.GetLogicalDrives()
+            for i in range(26):
+                if mask & (1 << i):
+                    path = chr(ord("A") + i) + ":\\"
+                    if ctypes.windll.kernel32.GetDriveTypeW(path) == 2:
+                        found.append(path)
+        return found
+
+    def card_text(self, drive):
         try:
-            with open(os.path.join(path, CARD_FILE), "r") as f:
-                parts = f.read().split()
-            return (parts[0], parts[1]) if len(parts) >= 2 else None
+            with open(os.path.join(drive, CARD_FILE), "r") as f:
+                return f.read()
         except OSError:
             return None
 
-    # ---------- registration ----------
+    def read_card(self, drive):
+        text = self.card_text(drive)
+        parts = text.split() if text else []
+        if len(parts) != 2:
+            return None
+        acc_no, pin = parts
+        if len(acc_no) == 5 and acc_no.isdigit() and len(pin) == 4 and pin.isdigit():
+            return acc_no, pin
+        return None
+
+    def write_card(self, drive, acc_no, encrypted_pin):
+        try:
+            with open(os.path.join(drive, CARD_FILE), "w") as f:
+                f.write(f"{acc_no} {encrypted_pin}\n")
+            return True
+        except OSError:
+            return False
+
+    def restore_card(self, drive, old_text):
+        path = os.path.join(drive, CARD_FILE)
+        try:
+            if old_text is None:
+                os.remove(path)
+            else:
+                with open(path, "w") as f:
+                    f.write(old_text)
+        except OSError:
+            pass
+
+    def card_drive(self):
+        for d in self.drives():
+            if self.read_card(d):
+                return d
+        return ""
+
+    def blank_drive(self):
+        found = self.drives()
+        for d in found:
+            if not self.read_card(d):
+                return d
+        return found[0] if found else ""
+
+    def card_state(self):
+        d = self.card_drive()
+        if d:
+            return "card", d
+        found = self.drives()
+        return ("blank", found[0]) if found else ("none", "")
+
+    def card_matches(self, acc_no):
+        d = self.card_drive()
+        card = self.read_card(d) if d else None
+        return bool(card and card[0] == acc_no)
+
     def create_account(self, name, birthday, contact, deposit, pin):
-        """Validate, write the card and store the account.
-        Returns (ok, message, account_no)."""
         name = name.strip()
         if not name or "," in name:
             return False, "Account name cannot be empty or contain commas.", None
         if not self.is_valid_birthday(birthday):
-            return False, "Invalid birthday! Please use MM/DD/YYYY (e.g., 07/16/2006).", None
+            return False, "Invalid birthday! Use a real date as MM/DD/YYYY (e.g., 07/16/2006).", None
         if not self.is_valid_contact(contact):
             return False, "Invalid contact number! Must be exactly 11 digits (numbers only).", None
-        if deposit < 5000:
-            return False, "Initial deposit must be at least \u20b15,000.", None
+        if not math.isfinite(deposit) or deposit < 5000 or deposit > MAX_AMOUNT:
+            return False, "Initial deposit must be between \u20b15,000 and \u20b11,000,000,000.", None
         if not self.is_valid_pin(pin):
             return False, "PIN must be exactly 4 digits (numbers only).", None
 
-        drive_path = self.find_usb_drive_path()
-        if not drive_path:
+        drive = self.blank_drive()
+        if not drive:
             return False, "No flash drive detected. Registration cannot be completed without a card.", None
 
-        a = Account(self.generate_account_no(), name, birthday, contact,
-                    deposit, self.encrypt_pin(pin))
-        if not self.write_to_card(drive_path, a.account_no, a.encrypted_pin):
-            return False, (f"Could not write the card file to {drive_path}\n"
-                           f"{self.last_error}\nRegistration was not completed."), None
+        old_card = self.card_text(drive)
+        acc = Account(self.generate_account_no(), name, birthday, contact,
+                      round(deposit, 2), self.encrypt_pin(pin))
+        if not self.write_card(drive, acc.account_no, acc.encrypted_pin):
+            return False, "Could not write the card file to " + drive + "\nRegistration was not completed.", None
 
-        node = Node(a)
+        node = Node(acc)
         node.next = self.head
         self.head = node
         if not self.save():
-            return True, ("Warning: account created but could not be saved to disk. "
-                          "Please contact an administrator."), a.account_no
-        return True, "", a.account_no
+            self.head = node.next
+            self.restore_card(drive, old_card)
+            return False, "Could not save the account to disk, so registration was cancelled.", None
+        return True, "", acc.account_no
 
-    # ---------- login ----------
     def load_card_account(self):
-        """Read the inserted card and match it with the master list.
-        Returns (account_no, error_message); account_no is None on error."""
-        drive_path = self.find_usb_drive_path()
-        if not drive_path:
+        if not self.drives():
             return None, "No card detected. Please insert your flash drive to continue."
-        card = self.read_card(drive_path)
-        if card is None:
-            return None, "No card found on the drive."
-        card_acc_no, card_pin = card
-        acc = self.locate(card_acc_no)
+        drive = self.card_drive()
+        if not drive:
+            return None, "No valid card was found on the inserted drive."
+        acc_no, card_pin = self.read_card(drive)
+        acc = self.locate(acc_no)
         if acc is None:
             return None, "No matching account found in the system."
         if acc.data.encrypted_pin != card_pin:
             return None, "PIN mismatch between card and record. Access denied."
-        return card_acc_no, None
+        return acc_no, None
 
     def verify_pin(self, acc_no, pin):
         acc = self.locate(acc_no)
         return (acc is not None and self.is_valid_pin(pin)
                 and self.encrypt_pin(pin) == acc.data.encrypted_pin)
 
-    # ---------- transactions (they print their result; the GUI captures it) ----------
     def withdraw(self, acc_no, amount):
         acc = self.locate(acc_no)
         if acc is None:
-            print("Account not found.")
-            return
-        if amount <= 0:
-            print("Invalid amount. Please input an amount greater than zero.")
-            return
+            return False, "Account not found."
+        if not self.is_valid_amount(amount):
+            return False, "Invalid amount. Please enter a number greater than zero."
         if amount < 100:
-            print("Minimum withdrawal amount is \u20b1100.")
-            return
-        whole = int(amount)
-        if amount != whole or whole % 100 != 0:
-            print("Withdrawal amount must be in multiples of 100 (no change allowed).")
-            return
+            return False, "Minimum withdrawal amount is \u20b1100."
+        if amount % 100 != 0:
+            return False, "Withdrawal amount must be in multiples of 100 (no change allowed)."
         if amount > acc.data.balance:
-            print("Insufficient funds!")
-            return
-        acc.data.balance -= amount
+            return False, "Insufficient funds!"
+        old = acc.data.balance
+        acc.data.balance = round(old - amount, 2)
         if not self.save():
-            acc.data.balance += amount
-            print("Error: could not save transaction. Withdrawal cancelled.")
-            return
-        print(f"Withdrawal successful!\nNew balance: \u20b1{acc.data.balance:,.2f}")
+            acc.data.balance = old
+            return False, "Could not save the transaction. Withdrawal cancelled."
+        return True, f"Withdrawal successful!\nNew balance: \u20b1{acc.data.balance:,.2f}"
 
     def deposit(self, acc_no, amount):
         acc = self.locate(acc_no)
         if acc is None:
-            print("Account not found.")
-            return
+            return False, "Account not found."
+        if not self.is_valid_amount(amount):
+            return False, "Invalid amount. Please enter a number greater than zero."
+        amount = round(amount, 2)
         if amount < 100:
-            print("Minimum deposit amount is \u20b1100.")
-            return
-        acc.data.balance += amount
+            return False, "Minimum deposit amount is \u20b1100."
+        old = acc.data.balance
+        acc.data.balance = round(old + amount, 2)
         if not self.save():
-            acc.data.balance -= amount
-            print("Error: could not save transaction. Deposit cancelled.")
-            return
-        print(f"Deposit successful!\nNew balance: \u20b1{acc.data.balance:,.2f}")
+            acc.data.balance = old
+            return False, "Could not save the transaction. Deposit cancelled."
+        return True, f"Deposit successful!\nNew balance: \u20b1{acc.data.balance:,.2f}"
 
     def fund_transfer(self, from_acc, to_acc, amount):
         sender = self.locate(from_acc)
-        receiver = self.locate(to_acc)
+        receiver = self.locate(to_acc.strip())
         if sender is None:
-            print("Sender account not found.")
-            return
+            return False, "Sender account not found."
         if receiver is None:
-            print("Receiver account not found.")
-            return
+            return False, "Receiver account not found."
         if sender is receiver:
-            print("Cannot transfer funds to your own account.")
-            return
-        if amount <= 0:
-            print("Invalid amount. Please input an amount greater than zero.")
-            return
+            return False, "Cannot transfer funds to your own account."
+        if not self.is_valid_amount(amount):
+            return False, "Invalid amount. Please enter a number greater than zero."
+        amount = round(amount, 2)
         if amount > sender.data.balance:
-            print("Insufficient balance to perform this transfer.")
-            return
-        sender.data.balance -= amount
-        receiver.data.balance += amount
+            return False, "Insufficient balance to perform this transfer."
+        old_s, old_r = sender.data.balance, receiver.data.balance
+        sender.data.balance = round(old_s - amount, 2)
+        receiver.data.balance = round(old_r + amount, 2)
         if not self.save():
-            sender.data.balance += amount
-            receiver.data.balance -= amount
-            print("Error: could not save transaction. Transfer cancelled.")
-            return
-        print(f"Transfer successful!\n\u20b1{amount:,.2f} sent to account {receiver.data.account_no}\n"
-              f"Your balance: \u20b1{sender.data.balance:,.2f}")
+            sender.data.balance, receiver.data.balance = old_s, old_r
+            return False, "Could not save the transaction. Transfer cancelled."
+        return True, (f"Transfer successful!\n\u20b1{amount:,.2f} sent to account {receiver.data.account_no}\n"
+                      f"Your balance: \u20b1{sender.data.balance:,.2f}")
 
     def change_pin(self, acc_no, new_pin):
         acc = self.locate(acc_no)
         if acc is None:
-            print("Account not found.")
-            return
+            return False, "Account not found."
         if not self.is_valid_pin(new_pin):
-            print("PIN must be exactly 4 digits (numbers only). PIN not changed.")
-            return
-        old = acc.data.encrypted_pin
-        acc.data.encrypted_pin = self.encrypt_pin(new_pin)
+            return False, "PIN must be exactly 4 digits (numbers only). PIN not changed."
+        if not self.card_matches(acc_no):
+            return False, "Insert the card that belongs to this account to change its PIN."
+
+        drive = self.card_drive()
+        old_pin, old_card = acc.data.encrypted_pin, self.card_text(drive)
+        new_enc = self.encrypt_pin(new_pin)
+        if not self.write_card(drive, acc_no, new_enc):
+            return False, "Could not write the new PIN to your card. PIN not changed."
+        acc.data.encrypted_pin = new_enc
         if not self.save():
-            acc.data.encrypted_pin = old
-            print("Error: could not save new PIN. PIN not changed.")
-            return
-        drive_path = self.find_usb_drive_path()
-        if not drive_path:
-            acc.data.encrypted_pin = old
-            self.save()
-            print("No flash drive detected. PIN change cancelled - please insert your card and try again.")
-            return
-        if not self.write_to_card(drive_path, acc_no, acc.data.encrypted_pin):
-            acc.data.encrypted_pin = old
-            self.save()
-            print("Error writing to card. PIN change cancelled.")
-            return
-        print("PIN successfully updated in the system and on your card!")
+            acc.data.encrypted_pin = old_pin
+            self.restore_card(drive, old_card)
+            return False, "Could not save the new PIN. PIN not changed."
+        return True, "PIN successfully updated in the system and on your card!"
 
-    # ---------- admin ----------
     def delete_account(self, acc_no):
-        if self.head is None:
-            print("No accounts available to delete.")
-            return
-        p = q = self.head
-        while p is not None and p.data.account_no != acc_no:
-            q = p
-            p = p.next
-        if p is None:
-            print("Account number not found.")
-            return
-        if p is self.head:
-            self.head = self.head.next
-        else:
-            q.next = p.next
+        prev, node = None, self.head
+        while node is not None and node.data.account_no != acc_no:
+            prev, node = node, node.next
+        if node is None:
+            return False, "Account number not found."
 
-        drive_path = self.find_usb_drive_path()
-        if not drive_path:
-            print("No flash drive detected - card file was not removed from any drive.")
+        if prev is None:
+            self.head = node.next
         else:
-            card = self.read_card(drive_path)
-            if card and card[0] == acc_no:
-                try:
-                    os.remove(os.path.join(drive_path, CARD_FILE))
-                    print("Card file removed from flash drive.")
-                except OSError:
-                    print("Warning: could not remove card file from flash drive.")
+            prev.next = node.next
+        if not self.save():
+            if prev is None:
+                self.head = node
             else:
-                print("The inserted card does not belong to this account.")
+                prev.next = node
+            return False, "Could not save the change, so nothing was deleted."
 
-        if self.save():
-            print(f"Account {acc_no} successfully deleted!")
-        else:
-            print("Error saving changes to disk after deletion.")
+        lines = [f"Account {acc_no} successfully deleted!"]
+        drive = self.card_drive()
+        card = self.read_card(drive) if drive else None
+        if card and card[0] == acc_no:
+            try:
+                os.remove(os.path.join(drive, CARD_FILE))
+                lines.append("Card file removed from the flash drive.")
+            except OSError:
+                lines.append("Warning: could not remove the card file from the flash drive.")
+        return True, "\n".join(lines)
 
-    def all_accounts(self):
-        out, p = [], self.head
-        while p is not None:
-            out.append(p.data)
-            p = p.next
-        return out
-
-    # ---------- master list file ----------
     def save(self):
+        tmp = self.master_file + ".tmp"
         try:
-            with open(self.master_file, "w", encoding="utf-8") as f:
-                p = self.head
-                while p is not None:
-                    d = p.data
+            with open(tmp, "w", encoding="utf-8") as f:
+                for d in self.all_accounts():
                     f.write(",".join([d.account_no, d.account_name, d.birthday,
-                                      d.contact_number, str(d.balance),
-                                      d.encrypted_pin]) + "\n")
-                    p = p.next
+                                      d.contact_number, str(d.balance), d.encrypted_pin]) + "\n")
+            os.replace(tmp, self.master_file)
             return True
         except OSError:
             return False
 
     def retrieve(self):
         try:
-            f = open(self.master_file, "r", encoding="utf-8")
+            with open(self.master_file, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
         except OSError:
             return
-        with f:
-            for line in f:
-                line = line.rstrip("\r\n")
-                if not line:
-                    continue
-                parts = line.split(",")
-                if len(parts) != 6:
-                    continue
-                acc_no, name, bday, contact, bal, enc = parts
-                try:
-                    balance = float(bal)
-                except ValueError:
-                    continue
-                node = Node(Account(acc_no, name, bday, contact, balance, enc))
-                node.next = self.head
-                self.head = node
+        for line in lines:
+            parts = line.split(",")
+            if len(parts) != 6:
+                continue
+            acc_no, name, bday, contact, bal, enc = parts
+            try:
+                balance = float(bal)
+            except ValueError:
+                continue
+            if not math.isfinite(balance):
+                continue
+            node = Node(Account(acc_no, name, bday, contact, balance, enc))
+            node.next = self.head
+            self.head = node
 
-
-# =====================================================================
-#  GUI  -  layout from the "ATM SYSTEM" Figma file (960 x 720)
-# =====================================================================
+#GUI LAYOUT
 W, H = 960, 720
 
 BG = "#E9E9E9"
@@ -388,8 +370,8 @@ GREEN = "#2BAE66"
 RED = "#E8514A"
 BLUE = "#5B8DFF"
 BLUE_SHADOW = "#A3B1C6"
+AMBER = "#E0A100"
 
-# soft-shadow sizes: (offset, blur)
 LEVELS = {"xl": (9, 18), "l": (6, 12), "m": (5, 9), "s": (3, 6)}
 
 
@@ -407,14 +389,20 @@ def short_path(p, n=30):
     return p if len(p) <= n else "\u2026" + p[-(n - 1):]
 
 
+def parse_amount(text):
+    try:
+        value = float(text.replace(",", ""))
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
 def _sd(px, py, hw, hh, r):
-    """Signed distance from (px, py) to a rounded rectangle centred on the origin."""
     qx, qy = abs(px) - hw + r, abs(py) - hh + r
     return min(max(qx, qy), 0.0) + math.hypot(max(qx, 0.0), max(qy, 0.0)) - r
 
 
 def _zone(n, z):
-    """Pixels far from the edges all look alike, so only a few have to be computed."""
     z = max(0, min(z, n // 2))
     reps = list(range(z)) + ([z] if n - 2 * z > 0 else []) + list(range(n - z, n))
     idx = []
@@ -429,7 +417,6 @@ def _zone(n, z):
 
 
 def _png(W, H, zx, zy, f, rgb, amax):
-    """Build a W x H RGBA PNG (base64) whose alpha is f(x, y) * amax."""
     xr, xi = _zone(W, zx)
     yr, yi = _zone(H, zy)
     rows = []
@@ -454,9 +441,6 @@ def _png(W, H, zx, zy, f, rgb, amax):
 
 
 class NeuCanvas(tk.Canvas):
-    """Canvas that draws soft neumorphic blocks.
-    Shadows and edges are real semi-transparent images, so they blend smoothly."""
-
     def __init__(self, master):
         super().__init__(master, width=W, height=H, bg=BG, highlightthickness=0, bd=0)
         self._cache = {}
@@ -474,7 +458,6 @@ class NeuCanvas(tk.Canvas):
         return wb, hb, max(0, min(r, wb / 2, hb / 2))
 
     def body(self, x1, y1, x2, y2, r, color=BG, tags=()):
-        """Flat block with smooth (anti-aliased) rounded corners."""
         wb, hb, r = self._size(x1, y1, x2, y2, r)
 
         def make():
@@ -486,7 +469,6 @@ class NeuCanvas(tk.Canvas):
         return self.create_image(int(round(x1)), int(round(y1)), image=img, anchor="nw", tags=tags)
 
     def neu_shadow(self, x1, y1, x2, y2, r, lvl="m", tags=()):
-        """Dark shadow bottom-right + white highlight top-left."""
         d, blur = LEVELS[lvl]
         wb, hb, r = self._size(x1, y1, x2, y2, r)
         m = int(blur * 1.5) + 2
@@ -510,12 +492,10 @@ class NeuCanvas(tk.Canvas):
         self.create_image(ix - d, iy - d, image=light, anchor="nw", tags=tags)
 
     def panel(self, x1, y1, x2, y2, r=20, lvl="m", tags=()):
-        """A raised block."""
         self.neu_shadow(x1, y1, x2, y2, r, lvl, tags)
         self.body(x1, y1, x2, y2, r, BG, tags)
 
     def inset(self, x1, y1, x2, y2, r=15, tags=()):
-        """A pressed-in block (text fields)."""
         wb, hb, r = self._size(x1, y1, x2, y2, r)
         self.body(x1, y1, x2, y2, r, BG, tags)
         d, blur = 3, 7
@@ -537,7 +517,6 @@ class NeuCanvas(tk.Canvas):
             self.create_image(int(round(x1)), int(round(y1)), image=img, anchor="nw", tags=tags)
 
     def glyph(self, name, cx, cy, tags=()):
-        """The only two symbols left: back arrow and the delete cross."""
         if name == "back":
             self.create_line(cx + 5, cy - 12, cx - 5, cy, cx + 5, cy + 12, fill="#8C8C8C",
                              width=3, capstyle="round", joinstyle="round", tags=tags)
@@ -581,9 +560,6 @@ class App:
         self.show_home()
         self.poll_card()
 
-    # ------------------------------------------------------------------
-    #  helpers
-    # ------------------------------------------------------------------
     def run(self):
         self.root.mainloop()
 
@@ -600,13 +576,6 @@ class App:
             kw["width"] = width
         return self.cv.create_text(x, y, **kw)
 
-    def call(self, fn, *args):
-        """Run a backend function and capture what it prints."""
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            res = fn(*args)
-        return res, buf.getvalue().strip()
-
     def clear(self, page):
         self.cv.delete("all")
         for e, _ in self.entries.values():
@@ -617,25 +586,25 @@ class App:
         self.cv.configure(cursor="")
 
     def card(self):
-        """The big rounded content panel."""
         self.cv.panel(74, 144, 869, 686, r=20, lvl="xl")
 
-    # ------------------------------------------------------------------
-    #  card status pill (top right)
-    # ------------------------------------------------------------------
+    CARD_STATES = {"card": (GREEN, "Card Detected"),
+                   "blank": (AMBER, "Blank Drive Detected"),
+                   "none": (RED, "No Card Detected")}
+
     def refresh_card_status(self):
-        path = self.atm.find_usb_drive_path()
-        ok = bool(path)
-        self.cv.itemconfigure("card_dot", fill=GREEN if ok else RED)
-        self.cv.itemconfigure("card_text", text="Card Detected" if ok else "No Card Detected")
-        self.cv.itemconfigure("card_path", text=short_path(path) if ok else "Insert a flash drive")
+        state, path = self.atm.card_state()
+        color, title = self.CARD_STATES[state]
+        self.cv.itemconfigure("card_dot", fill=color)
+        self.cv.itemconfigure("card_text", text=title)
+        self.cv.itemconfigure("card_path", text=short_path(path) if path else "Insert a flash drive")
 
     def poll_card(self):
         try:
             self.refresh_card_status()
-            if self.session and not self.modal and not self.atm.card_present():
+            if self.session and not self.modal and not self.atm.card_matches(self.session):
                 self.session = None
-                self.dialog("Card removed", "Your card was removed, so the session was ended.",
+                self.dialog("Card removed", "Your card was removed or changed, so the session was ended.",
                             "error", [("OK", self.show_home)])
         finally:
             self.root.after(1000, self.poll_card)
@@ -656,9 +625,6 @@ class App:
             self.t(44, 54, title, 32, True)
         self.status_pill()
 
-    # ------------------------------------------------------------------
-    #  buttons
-    # ------------------------------------------------------------------
     def button(self, x1, y1, x2, y2, text=None, cmd=None, r=20, style="l",
                decor=None, size=16, bold=True, fg=BLACK, modal=False, tags=()):
         bid = "b%d" % next(self.ids)
@@ -678,7 +644,7 @@ class App:
         x1, y1, x2, y2 = b["box"]
         if pressed:
             self.cv.body(x1, y1, x2, y2, b["r"], mix(BG, "#000000", 0.07), tags)
-        elif b["style"] == "flat":          # body only (shadow drawn separately)
+        elif b["style"] == "flat": 
             self.cv.body(x1, y1, x2, y2, b["r"], BG, tags)
         else:
             self.cv.panel(x1, y1, x2, y2, b["r"], b["style"], tags)
@@ -718,9 +684,6 @@ class App:
             self.t(x1 + 34 + dx, y1 + 70 + dy, sub, 14, False, SUB, tags=tags)
         self.button(x1, y1, x1 + 333, y1 + 124, cmd=cmd, decor=decor, r=19, style="m")
 
-    # ------------------------------------------------------------------
-    #  dialogs (drawn on the canvas so they match the design)
-    # ------------------------------------------------------------------
     def _begin_modal(self):
         self.modal = True
         for _, win in self.entries.values():
@@ -729,9 +692,8 @@ class App:
         for bid in self.dlg_btns:
             self.btns.pop(bid, None)
         self.dlg_btns = []
-        # solid background so the page underneath doesn't show through
         self.cv.create_rectangle(0, 0, W, H, fill=BG, outline="", tags="dlg")
-        self.cv.focus_set()     # keyboard focus leaves the (hidden) text fields
+        self.cv.focus_set()
 
     def dialog(self, title, msg, kind="info", buttons=None):
         buttons = buttons or [("OK", None)]
@@ -771,7 +733,6 @@ class App:
             self.focus_first()
 
     def balance_card(self, acc):
-        """The 'Available balance card' component from the design."""
         self._begin_modal()
         bw, bh = 644, 350
         x1, y1 = (W - bw) // 2, (H - bh) // 2
@@ -789,9 +750,6 @@ class App:
                           style="m", tags=("dlg",))
         self.dlg_btns.append(bid)
 
-    # ------------------------------------------------------------------
-    #  form fields
-    # ------------------------------------------------------------------
     def field(self, name, label, x, y, w, h=60, show=None, prefix=None):
         self.t(x + 1, y - 19, label, 12, True, GRAY)
         self.cv.inset(x, y, x + w, y + h, r=15)
@@ -820,7 +778,7 @@ class App:
 
     def bind_enter(self, cmd):
         def handler(ev):
-            if not self.modal:          # ignore Enter while a message is showing
+            if not self.modal:
                 cmd()
             return "break"
         for e, _ in self.entries.values():
@@ -830,9 +788,6 @@ class App:
     def val(self, name):
         return self.entries[name][0].get().strip()
 
-    # ==================================================================
-    #  MAIN
-    # ==================================================================
     def show_home(self):
         self.session = None
         self.clear("home")
@@ -850,13 +805,10 @@ class App:
             self.list_row(131, y, 809, y + 89, title, sub, cmd, color)
             y += 113
 
-    # ==================================================================
-    #  REGISTRATION  (card is checked BEFORE the form opens)
-    # ==================================================================
     def open_registration(self):
-        if not self.atm.card_present():
+        if not self.atm.drives():
             self.dialog("No Card Detected",
-                        "Please insert a flash drive or card, then try registering again.", "error")
+                        "Please insert a flash drive, then try registering again.", "error")
             return
         self.show_register()
 
@@ -875,32 +827,23 @@ class App:
     def submit_register(self):
         if self.modal:
             return
-        try:
-            dep = float(self.val("deposit").replace(",", ""))
-        except ValueError:
+        deposit = parse_amount(self.val("deposit"))
+        if deposit is None:
             self.dialog("Invalid deposit", "Please enter a valid number for the initial deposit.", "error")
             return
-        (ok, msg, acc_no), _ = self.call(self.atm.create_account, self.val("name"), self.val("bday"),
-                                         self.val("contact"), dep, self.val("pin"))
+        ok, msg, acc_no = self.atm.create_account(self.val("name"), self.val("bday"),
+                                                  self.val("contact"), deposit, self.val("pin"))
         if not ok:
             self.dialog("Registration failed", msg, "error")
             return
-        text = f"Account number: {acc_no}\nYour card has been written."
-        if msg:
-            text += "\n" + msg
-        self.dialog("Registration successful", text, "success", [("Done", self.show_home)])
+        self.dialog("Registration successful",
+                    f"Account number: {acc_no}\nYour card has been written.",
+                    "success", [("Done", self.show_home)])
 
-    # ==================================================================
-    #  TRANSACTION  (card is checked BEFORE the PIN screen / menu)
-    # ==================================================================
     def open_transaction(self):
-        if not self.atm.card_present():
-            self.dialog("No Card Detected",
-                        "Please insert your flash drive or card, then try again.", "error")
-            return
-        (acc_no, err), _ = self.call(self.atm.load_card_account)
+        acc_no, err = self.atm.load_card_account()
         if err:
-            self.dialog("Card error", err, "error")
+            self.dialog("Card error" if self.atm.drives() else "No Card Detected", err, "error")
             return
         self.pin_acc, self.pin_buf, self.attempts = acc_no, "", 0
         self.show_pin()
@@ -918,10 +861,10 @@ class App:
 
         keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "C", "0", "OK"]
         xs, ys = (230, 402, 575), (335, 414, 493, 572)
-        for i in range(len(keys)):          # pass 1: shadows (never cover a neighbour key)
+        for i in range(len(keys)):
             x, y = xs[i % 3], ys[i // 3]
             self.cv.neu_shadow(x, y, x + 155, y + 63, 20, "m")
-        for i, k in enumerate(keys):        # pass 2: key bodies + labels
+        for i, k in enumerate(keys):
             x, y = xs[i % 3], ys[i // 3]
             color = "#FF4B4B" if k == "C" else (BLUE if k == "OK" else KEY_TXT)
             self.button(x, y, x + 155, y + 63, k, lambda k=k: self.pin_key(k),
@@ -954,7 +897,6 @@ class App:
     def on_key(self, e):
         enter = e.keysym in ("Return", "KP_Enter")
         if self.modal:
-            # Enter closes a single-button message (but not Yes/No questions)
             if enter and e.widget is self.cv and len(self.dlg_btns) == 1:
                 cmd = self.btns[self.dlg_btns[0]]["cmd"]
                 if cmd:
@@ -992,7 +934,6 @@ class App:
             self.dialog("Incorrect PIN", f"{left} attempt(s) remaining.", "error",
                         [("Try again", None)])
 
-    # ---------------- transaction dashboard ----------------
     def end_session(self):
         self.session = None
         self.show_home()
@@ -1022,7 +963,6 @@ class App:
     def exit_session(self):
         self.dialog("Goodbye", "Please remove your flash drive.", "info", [("OK", self.end_session)])
 
-    # ---------------- action forms ----------------
     ACTIONS = {
         "withdraw": ("Withdraw", "Withdraw", [("amount", "Amount (multiples of 100)", None, "\u20b1")]),
         "deposit": ("Deposit", "Deposit", [("amount", "Amount (min. \u20b1100)", None, "\u20b1")]),
@@ -1052,31 +992,30 @@ class App:
         if self.modal:
             return
         acc_no = self.session
+        if not self.atm.card_matches(acc_no):
+            self.dialog("Card removed", "Your card was removed or changed, so the session was ended.",
+                        "error", [("OK", self.end_session)])
+            return
         if kind == "pin":
             if self.val("new") != self.val("confirm"):
                 self.dialog("PINs do not match", "Please enter the same PIN twice.", "error")
                 return
-            _, out = self.call(self.atm.change_pin, acc_no, self.val("new"))
+            ok, msg = self.atm.change_pin(acc_no, self.val("new"))
         else:
-            try:
-                amount = float(self.val("amount").replace(",", ""))
-            except ValueError:
+            amount = parse_amount(self.val("amount"))
+            if amount is None:
                 self.dialog("Invalid amount", "Please enter a valid number.", "error")
                 return
             if kind == "withdraw":
-                _, out = self.call(self.atm.withdraw, acc_no, amount)
+                ok, msg = self.atm.withdraw(acc_no, amount)
             elif kind == "deposit":
-                _, out = self.call(self.atm.deposit, acc_no, amount)
+                ok, msg = self.atm.deposit(acc_no, amount)
             else:
-                _, out = self.call(self.atm.fund_transfer, acc_no, self.val("to"), amount)
-        ok = "success" in out.lower()
-        self.dialog("Success" if ok else "Could not complete", out,
+                ok, msg = self.atm.fund_transfer(acc_no, self.val("to"), amount)
+        self.dialog("Success" if ok else "Could not complete", msg,
                     "success" if ok else "error",
                     [("OK", self.show_dashboard if ok else None)])
 
-    # ==================================================================
-    #  ADMIN
-    # ==================================================================
     def show_admin_login(self):
         self.clear("admin_login")
         self.header("Admin", back=self.show_home)
@@ -1146,9 +1085,8 @@ class App:
                     "error", [("Cancel", None), ("Delete", lambda: self.do_delete(a.account_no))])
 
     def do_delete(self, acc_no):
-        _, out = self.call(self.atm.delete_account, acc_no)
-        ok = "successfully deleted" in out
-        self.dialog("Account deleted" if ok else "Delete failed", out or "Nothing happened.",
+        ok, msg = self.atm.delete_account(acc_no)
+        self.dialog("Account deleted" if ok else "Delete failed", msg,
                     "success" if ok else "error", [("OK", self.show_admin)])
 
 
